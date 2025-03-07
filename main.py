@@ -5,8 +5,9 @@ from matplotlib.animation import FuncAnimation
 import time
 import threading
 import queue  # Add missing queue import
+import types  # Add types import at the beginning with other imports
 from continues import AdaptiveExponentialLIFNeuron, RewardModulatedSTDPSynapse, NeuralModule, ContinuouslyAdaptingNeuralSystem
-
+import random
 class PerceptionModule(NeuralModule):
     """Module that processes sensory input"""
     def __init__(self, input_size=10, hidden_size=20, output_size=5):
@@ -43,9 +44,10 @@ class AssociationModule(NeuralModule):
         """Override forward method to safely handle tensors with gradients"""
         # Convert tensor with gradients to numpy safely if needed
         if isinstance(signal, torch.Tensor) and signal.requires_grad:
-            # Use detach() before any potential numpy conversion
-            signal_processed = signal.detach()
-            # Pass the detached tensor to parent's implementation
+            # Copy the tensor but allow for gradient propagation
+            # Don't use detach() as it breaks the learning path
+            signal_processed = signal.clone()
+            # Pass the processed tensor to parent's implementation
             return super().forward(signal_processed)
         else:
             return super().forward(signal)
@@ -139,10 +141,30 @@ class Visualizer:
             if isinstance(stat, (list, tuple, np.ndarray)):
                 stat = np.mean(stat)
             activities.append(stat)
+        
+        # Calculate cross-module activity
+        cross_module_activity = 0.0
+        if hasattr(self.neural_system, 'cross_module_connections') and self.neural_system.cross_module_connections:
+            # Calculate activity based on weight changes and signal transmission across modules
+            cross_activity_signals = []
+            for key, synapse in self.neural_system.cross_module_connections.items():
+                # Track recent weight changes as a measure of cross-module activity
+                if hasattr(synapse, 'recent_weight_changes'):
+                    cross_activity_signals.append(abs(synapse.recent_weight_changes))
+                else:
+                    # If no weight change tracking, use current weight as approximation
+                    cross_activity_signals.append(abs(synapse.weight.item()))
+            
+            cross_module_activity = np.mean(cross_activity_signals) if cross_activity_signals else 0.0
+        
+        # Store cross-module activity in neural system for reference
+        self.neural_system.avg_cross_module_activity = cross_module_activity
+        
         self.neural_system.performance_history.append({
             'time': self.neural_system.global_time,
             'cross_connections': len(self.neural_system.cross_module_connections),
-            'average_activity': np.mean(activities)
+            'average_activity': np.mean(activities),
+            'cross_module_activity': cross_module_activity
         })
         
     def update_plots(self):
@@ -172,7 +194,8 @@ class Visualizer:
         # Update reward history
         self.axes[2, 1].clear()
         self.axes[2, 1].set_title('Reward History')
-        self.axes[2, 1].plot(self.time_points[-100:], self.rewards_history[-100:])
+        common_len = min(len(self.time_points), len(self.rewards_history))
+        self.axes[2, 1].plot(self.time_points[-common_len:], self.rewards_history[-common_len:])
         
         self.fig.canvas.draw()
         
@@ -286,11 +309,22 @@ class Visualizer:
             
             # Plot connection count
             connections = [metric['cross_connections'] for metric in self.neural_system.performance_history]
-            self.axes[2, 0].plot(times, connections, label='Cross-Connections', marker='o')
+            # Ensure arrays have same length before plotting
+            min_len = min(len(times), len(connections))
+            self.axes[2, 0].plot(times[:min_len], connections[:min_len], label='Cross-Connections', marker='o')
             
             # Plot average activity
             activities = [metric['average_activity'] for metric in self.neural_system.performance_history]
-            self.axes[2, 0].plot(times, activities, label='Avg Activity', marker='x')
+            # Ensure arrays have same length before plotting
+            min_len = min(len(times), len(activities))
+            self.axes[2, 0].plot(times[:min_len], activities[:min_len], label='Avg Activity', marker='x')
+            
+            # Add cross-module activity plot
+            if 'cross_module_activity' in self.neural_system.performance_history[0]:
+                cross_activities = [metric.get('cross_module_activity', 0) for metric in self.neural_system.performance_history]
+                # Ensure arrays have same length before plotting
+                min_len = min(len(times), len(cross_activities))
+                self.axes[2, 0].plot(times[:min_len], cross_activities[:min_len], label='Cross-Module Activity', marker='^', color='red')
             
             self.axes[2, 0].legend()
             self.axes[2, 0].set_xlabel('Time')
@@ -362,6 +396,8 @@ class SimpleEnvironment:
                     signals = np.zeros(module.input_size)
                     signals[0] = self.reward  # Use first input as reward channel
                     self.neural_system.process_sensory_input(signals, module_name)
+                    # Pass the same reward signals to association, so upstream synapses can learn
+                    self.neural_system.process_sensory_input(signals, "association")
                     
             except queue.Empty:  # Now queue should be properly recognized
                 # No action output yet
@@ -373,18 +409,176 @@ def main():
     """Main function to set up and run the neural system"""
     print("Initializing Neural System...")
     
+    # Enable CUDA if available
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print("Using device:", device)
+    
     # Create neural system
     system = ContinuouslyAdaptingNeuralSystem()
     
-    # Create modules
-    perception = PerceptionModule(input_size=10, hidden_size=20, output_size=5)
-    association = AssociationModule(input_size=8, hidden_size=25, output_size=8)
-    motor = MotorModule(input_size=5, hidden_size=15, output_size=3)
+    # Create modules and move them to device
+    perception = PerceptionModule(input_size=10, hidden_size=20, output_size=5).to(device)
+    association = AssociationModule(input_size=8, hidden_size=25, output_size=8).to(device)
+    motor = MotorModule(input_size=5, hidden_size=15, output_size=3).to(device)
     
     # Add modules to system
     system.add_module("perception", perception)
     system.add_module("association", association)
     system.add_module("motor", motor)
+    
+    # Track device in the neural system
+    system.device = device
+    
+    # Force creation of cross-module connections if not happening automatically
+    print("Creating inter-module connections...")
+    
+    # Fix: Use connect_modules method if it exists, otherwise manually create connections
+    try:
+        # Method 1: Try the most likely method name
+        if hasattr(system, "connect_modules"):
+            system.connect_modules("perception", "association", 
+                                   connection_density=0.5, 
+                                   initial_weight_range=(0.1, 0.3))
+            system.connect_modules("association", "motor", 
+                                  connection_density=0.5, 
+                                  initial_weight_range=(0.1, 0.3))
+        # Method 2: Try the add_cross_module_connection if it exists
+        elif hasattr(system, "add_cross_module_connection"):
+            for i in range(min(perception.output_size, association.input_size)):
+                system.add_cross_module_connection(
+                    "perception", "output", i, 
+                    "association", "input", i, 
+                    weight=0.2
+                )
+            for i in range(min(association.output_size, motor.input_size)):
+                system.add_cross_module_connection(
+                    "association", "output", i, 
+                    "motor", "input", i, 
+                    weight=0.2
+                )
+        # Method 3: Manual connection through direct manipulation of cross_module_connections
+        else:
+            print("Warning: Could not find appropriate method to create cross-module connections.")
+            print("Will attempt to create connections manually.")
+            
+            # Create RewardModulatedSTDPSynapse instances manually
+            if not hasattr(system, "cross_module_connections"):
+                system.cross_module_connections = {}
+                
+            # Connect perception output neurons to association input neurons
+            for i in range(min(perception.output_size, association.input_size)):
+                key = ("perception", "output", i, "association", "input", i)
+                if key not in system.cross_module_connections:
+                    # Create a synapse between these neurons
+                    from_neuron = perception.output_neurons[i] 
+                    to_neuron = association.input_neurons[i]
+                    synapse = RewardModulatedSTDPSynapse(
+                        initial_weight=0.2,  # fixed parameter name from "weight" to "initial_weight"
+                        learning_rate=0.01
+                    )
+                    system.cross_module_connections[key] = synapse
+                    print(f"Created synapse: {key}")
+            
+            # Connect association output neurons to motor input neurons
+            for i in range(min(association.output_size, motor.input_size)):
+                key = ("association", "output", i, "motor", "input", i)
+                if key not in system.cross_module_connections:
+                    # Create a synapse between these neurons
+                    from_neuron = association.output_neurons[i] 
+                    to_neuron = motor.input_neurons[i]
+                    synapse = RewardModulatedSTDPSynapse(
+                        initial_weight=0.2,  # fixed parameter name from "weight" to "initial_weight"
+                        learning_rate=0.01
+                    )
+                    system.cross_module_connections[key] = synapse
+                    print(f"Created synapse: {key}")
+        # >>> Added: Fallback if connections are still empty
+        if not system.cross_module_connections:
+            print("No cross-module connections found. Using manual fallback.")
+            # Implement manual creation code from Method 3
+            # Connect perception output neurons to association input neurons
+            for i in range(min(perception.output_size, association.input_size)):
+                key = ("perception", "output", i, "association", "input", i)
+                if key not in system.cross_module_connections:
+                    synapse = RewardModulatedSTDPSynapse(
+                        initial_weight=0.2,
+                        learning_rate=0.01
+                    )
+                    system.cross_module_connections[key] = synapse
+                    print(f"Fallback: Created synapse {key}")
+            
+            # Connect association output neurons to motor input neurons
+            for i in range(min(association.output_size, motor.input_size)):
+                key = ("association", "output", i, "motor", "input", i)
+                if key not in system.cross_module_connections:
+                    synapse = RewardModulatedSTDPSynapse(
+                        initial_weight=0.2,
+                        learning_rate=0.01
+                    )
+                    system.cross_module_connections[key] = synapse
+                    print(f"Fallback: Created synapse {key}")
+    
+    except Exception as e:
+        print(f"Error creating inter-module connections: {e}")
+        print("Continuing with simulation anyway...")
+    
+    # Add debugging to check if weights are actually changing
+    def monitor_weight_changes():
+        """Monitor weight changes over time"""
+        while system.is_running:
+            # Monitor module-internal weights
+            all_weights = []
+            for module_name, module in system.modules_dict.items():
+                for key, synapse in module.synapses.items():
+                    # Track weight change history if not already doing so
+                    if not hasattr(synapse, 'weight_history'):
+                        synapse.weight_history = []
+                    
+                    # Store current weight
+                    current_weight = synapse.weight.item()
+                    synapse.weight_history.append(current_weight)
+                    
+                    # Store recent change data
+                    if not hasattr(synapse, 'recent_weight_changes'):
+                        synapse.recent_weight_changes = 0.0
+                    
+                    # Calculate recent change if we have history
+                    if len(synapse.weight_history) > 1:
+                        synapse.recent_weight_changes = current_weight - synapse.weight_history[-2]
+                    
+                    all_weights.append((module_name, key, current_weight))
+            
+            # Monitor cross-module weights
+            for key, synapse in system.cross_module_connections.items():
+                # Track weight change history if not already doing so
+                if not hasattr(synapse, 'weight_history'):
+                    synapse.weight_history = []
+                
+                # Store current weight
+                current_weight = synapse.weight.item()
+                synapse.weight_history.append(current_weight)
+                
+                # Store recent change data
+                if not hasattr(synapse, 'recent_weight_changes'):
+                    synapse.recent_weight_changes = 0.0
+                
+                # Calculate recent change if we have history
+                if len(synapse.weight_history) > 1:
+                    synapse.recent_weight_changes = current_weight - synapse.weight_history[-2]
+                
+                all_weights.append(('cross', key, current_weight))
+            
+            # Print some stats occasionally
+            if system.global_time % 100 == 0:
+                changes = [abs(s.recent_weight_changes) for s in system.cross_module_connections.values()]
+                avg_change = np.mean(changes) if changes else 0
+                print(f"Time {system.global_time}: Average weight change: {avg_change:.6f}")
+            
+            time.sleep(0.5)  # Check every 0.5 seconds
+    
+    # Start weight monitoring in a separate thread
+    weight_monitor_thread = threading.Thread(target=monitor_weight_changes, daemon=True)
+    weight_monitor_thread.start()
     
     # Create environment
     env = SimpleEnvironment(system)
@@ -392,8 +586,114 @@ def main():
     # Create visualizer
     visualizer = Visualizer(system)
     
+    # Enhance the weight visualization in the Visualizer class
+    original_update_weight_histogram = visualizer._update_weight_histogram
+    
+    def enhanced_weight_histogram(self):
+        """Enhanced weight distribution histogram with change tracking"""
+        self.axes[1, 1].clear()
+        
+        # Collect weights and recent changes
+        weights = []
+        changes = []
+        
+        # Get module-internal weights
+        for module in self.neural_system.modules_dict.values():
+            for synapse in module.synapses.values():
+                weights.append(synapse.weight.item())
+                if hasattr(synapse, 'recent_weight_changes'):
+                    changes.append(abs(synapse.recent_weight_changes))
+        
+        # Get cross-module weights
+        for synapse in self.neural_system.cross_module_connections.values():
+            weights.append(synapse.weight.item())
+            if hasattr(synapse, 'recent_weight_changes'):
+                changes.append(abs(synapse.recent_weight_changes))
+                
+        mean_weight = np.mean(weights) if weights else 0
+        mean_change = np.mean(changes) if changes else 0
+        
+        # Update title with both mean weight and recent change statistics
+        self.axes[1, 1].set_title(f'Weights: μ={mean_weight:.3f}, Δ={mean_change:.5f}')
+        
+        if weights:
+            # Plot traditional histogram
+            n, bins, patches = self.axes[1, 1].hist(weights, bins=20, alpha=0.7, color='blue')
+            
+            # Add a line for the mean
+            self.axes[1, 1].axvline(mean_weight, color='red', linestyle='dashed', linewidth=2)
+            
+            # If we have weight change history, show it
+            if hasattr(self.neural_system, 'weight_change_history'):
+                times = range(len(self.neural_system.weight_change_history))
+                # Create a small subplot for weight change history
+                inset = self.axes[1, 1].inset_axes([0.6, 0.6, 0.35, 0.3])
+                inset.plot(times, self.neural_system.weight_change_history, 'g-')
+                inset.set_title('Weight Changes')
+                inset.set_xlabel('Time')
+                inset.set_ylabel('Δ')
+            
+            self.axes[1, 1].set_xlabel('Weight Value')
+            self.axes[1, 1].set_ylabel('Frequency')
+        else:
+            self.axes[1, 1].text(0.5, 0.5, "No weights available", ha='center', va='center')
+    
+    # Replace the original method with our enhanced version
+    visualizer._update_weight_histogram = types.MethodType(enhanced_weight_histogram, visualizer)
+    
+    # Add weight change history tracking to the neural system
+    system.weight_change_history = []
+    
+    # Enhance the reward feedback system to ensure it affects synapses
+    original_process_sensory_input = system.process_sensory_input
+    
+    def enhanced_process_sensory_input(self, input_signals, target_module=None):
+        # Call original method - FIX: don't pass self again as it's already bound
+        result = original_process_sensory_input(input_signals, target_module)
+        
+        # Check if this might be a reward signal (detected by amplitude in first channel)
+        if target_module is not None and input_signals[0] > 0:
+            # This might be a reward signal, ensure it propagates to synapses
+            reward_value = float(input_signals[0])
+            print(f"Detected possible reward signal: {reward_value:.3f} to {target_module}")
+            
+            weight_updates = 0
+            significant_changes = 0
+            
+            # Force the reward to be applied to relevant synapses
+            for key, synapse in self.cross_module_connections.items():
+                source_mod, _, _, dest_mod, _, _ = key
+                if source_mod == target_module or dest_mod == target_module:
+                    if hasattr(synapse, 'apply_reward'):
+                        # Track weight before update
+                        old_weight = synapse.weight.item()
+                        
+                        # Apply reward with enhanced debug
+                        synapse.apply_reward(reward_value)
+                        weight_updates += 1
+                        
+                        # Check if weight actually changed
+                        new_weight = synapse.weight.item()
+                        if abs(new_weight - old_weight) > 0.0001:  # Significant change threshold
+                            significant_changes += 1
+                        
+                        # Print detailed info for a sample of connections
+                        if random.random() < 0.05:  # Only print ~5% of updates to avoid flooding console
+                            print(f"  Synapse {key}: weight {old_weight:.4f} -> {new_weight:.4f}, " 
+                                  f"change: {new_weight - old_weight:.6f}, "
+                                  f"elig: {getattr(synapse, 'last_eligibility_value', 'N/A')}")
+            
+            # Summary statistics
+            print(f"Applied reward to {weight_updates} synapses, {significant_changes} had significant changes")
+        
+        return result
+    
+    # Replace the original method with our enhanced version
+    system.process_sensory_input = types.MethodType(enhanced_process_sensory_input, system)
+    
     # Start all components
     print("Starting simulation...")
+    
     system.start()
     env.start()
     
@@ -404,6 +704,27 @@ def main():
     plt.ion()  # Interactive mode
     plt.show()
     
+    # Add weight change tracking to update cycle
+    def update_weight_change_history():
+        # Get average absolute weight change across all synapses
+        changes = []
+        for synapse in system.cross_module_connections.values():
+            if hasattr(synapse, 'recent_weight_changes'):
+                changes.append(abs(synapse.recent_weight_changes))
+        
+        for module in system.modules_dict.values():
+            for synapse in module.synapses.values():
+                if hasattr(synapse, 'recent_weight_changes'):
+                    changes.append(abs(synapse.recent_weight_changes))
+        
+        avg_change = np.mean(changes) if changes else 0
+        system.weight_change_history.append(avg_change)
+        
+        # Keep history at a reasonable size
+        if len(system.weight_change_history) > 100:
+            system.weight_change_history = system.weight_change_history[-100:]
+    
+    # Run the update cycle
     try:
         print("Running... (Press Ctrl+C to stop)")
         while True:
@@ -411,6 +732,7 @@ def main():
             try:
                 data_ready = visualizer.data_queue.get(block=False)
                 if data_ready:
+                    update_weight_change_history()
                     visualizer.update_plots()
             except queue.Empty:
                 pass

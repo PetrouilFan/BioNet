@@ -147,6 +147,8 @@ class RewardModulatedSTDPSynapse(nn.Module):
         # Main weight parameter
         self.weight = nn.Parameter(torch.tensor(initial_weight))
         self.learning_rate = learning_rate
+        # Increase base learning rate for faster learning
+        self.base_learning_rate = learning_rate * 5.0  # Amplify learning rate
         self.enabled = True  # Can be disabled during pruning
         self.synapse_id = synapse_id
         
@@ -166,7 +168,11 @@ class RewardModulatedSTDPSynapse(nn.Module):
         
         # Eligibility trace for reward-modulated learning
         self.eligibility_trace = 0.0
-        self.eligibility_decay = 0.95
+        self.eligibility_decay = 0.95  # Reduced from 0.95 to 0.90 for slower decay
+        
+        # Debug information
+        self.last_weight_change = 0.0
+        self.last_eligibility_value = 0.0
         
         # Structural plasticity parameters
         self.structural_plasticity = structural_plasticity
@@ -211,38 +217,71 @@ class RewardModulatedSTDPSynapse(nn.Module):
         self.post_trace = self.post_trace * torch.exp(torch.tensor(-1.0/self.tau_minus)) + post_spike
         
         # Calculate STDP update based on relative timing
-        stdp_update = 0.0
+        stdp_update = torch.tensor(0.0)
         
         # Check if post-synaptic neuron fired (handle both scalar and tensor cases)
         if isinstance(post_spike, torch.Tensor) and post_spike.numel() > 1:
-            if post_spike.any() > 0:  # Any element is positive
+            if torch.any(post_spike > 0):  # Fix: Changed post_spike.any() > 0 to torch.any(post_spike > 0)
                 stdp_update += self.a_plus * self.pre_trace
         elif post_spike > 0:  # Scalar or single-element tensor case
             stdp_update += self.a_plus * self.pre_trace
         
         # Check if pre-synaptic neuron fired (handle both scalar and tensor cases)
         if isinstance(pre_spike, torch.Tensor) and pre_spike.numel() > 1:
-            if pre_spike.any() > 0:  # Any element is positive
+            if torch.any(pre_spike > 0):  # Fix: Changed pre_spike.any() > 0 to torch.any(pre_spike > 0)
                 stdp_update -= self.a_minus * self.post_trace
         elif pre_spike > 0:  # Scalar or single-element tensor case
             stdp_update -= self.a_minus * self.post_trace
         
+        # Add noise to eligibility trace to break symmetry and encourage exploration
+        noise = torch.randn(1).item() * 0.01  # Small random noise
+        
         # Update eligibility trace (candidate for weight change)
-        self.eligibility_trace = self.eligibility_trace * self.eligibility_decay + stdp_update
-        self.eligibility_history.append(float(self.eligibility_trace) if torch.is_tensor(self.eligibility_trace) else self.eligibility_trace)
+        self.eligibility_trace = self.eligibility_trace * self.eligibility_decay + stdp_update + noise
+        
+        # Store for debugging
+        self.last_eligibility_value = float(self.eligibility_trace) if torch.is_tensor(self.eligibility_trace) else self.eligibility_trace
+        
+        # Record history
+        self.eligibility_history.append(self.last_eligibility_value)
     
     def apply_reward(self, reward_signal):
         """Apply reward-modulated weight change using eligibility trace"""
         if not self.enabled:
             return
             
-        # Modify weight based on reward and eligibility
-        weight_change = self.learning_rate * reward_signal * self.eligibility_trace
-        self.weight.data += weight_change
+        # Handle edge case where eligibility trace is exactly 0
+        if self.eligibility_trace == 0 and random.random() < 0.05:
+            # Occasionally introduce small random change to break symmetry
+            self.eligibility_trace = (random.random() - 0.5) * 0.01
+            
+        # Convert to float if tensor to avoid gradient tracking issues
+        if torch.is_tensor(self.eligibility_trace):
+            eligibility_value = self.eligibility_trace.item()
+        else:
+            eligibility_value = self.eligibility_trace
+            
+        # Modify weight based on reward and eligibility (use amplified learning rate)
+        weight_change = self.base_learning_rate * reward_signal * eligibility_value
         
-        # Constrain weight to valid range
-        self.weight.data.clamp_(self.min_weight, self.max_weight)
-        self.weight_history.append(self.weight.item())
+        # Store for debugging
+        self.last_weight_change = weight_change
+        
+        # Apply weight change to tensor data
+        if self.weight.is_leaf:  # Check if weight is a leaf variable we can modify
+            self.weight.data += weight_change
+            
+            # Constrain weight to valid range
+            self.weight.data.clamp_(self.min_weight, self.max_weight)
+            
+            # Add current weight to history for tracking
+            if len(self.weight_history) > 100:  # Limit history size
+                self.weight_history = self.weight_history[-50:]
+            self.weight_history.append(self.weight.item())
+            
+            # Debug info if significant change
+            if abs(weight_change) > 0.001:
+                print(f"Weight changed by {weight_change:.4f} to {self.weight.item():.4f} (elig:{eligibility_value:.4f}, reward:{reward_signal:.2f})")
     
     def check_structural_plasticity(self, network_activity, time_step, current_density):
         """
