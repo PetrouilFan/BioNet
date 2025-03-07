@@ -250,10 +250,12 @@ class RewardModulatedSTDPSynapse(nn.Module):
         if not self.enabled:
             return
             
-        # Handle edge case where eligibility trace is exactly 0
-        if self.eligibility_trace == 0 and random.random() < 0.05:
-            # Occasionally introduce small random change to break symmetry
-            self.eligibility_trace = (random.random() - 0.5) * 0.01
+        # Modified: Force a minimum eligibility value when trace is too small
+        # This ensures rewards always cause meaningful weight changes
+        if abs(self.eligibility_trace) < 0.1:
+            # Use the sign of the existing trace if available, otherwise random sign
+            sign = 1.0 if self.eligibility_trace > 0 else (-1.0 if self.eligibility_trace < 0 else (1.0 if random.random() > 0.5 else -1.0))
+            self.eligibility_trace = sign * 0.1  # Force substantial eligibility for effective learning
             
         # Convert to float if tensor to avoid gradient tracking issues
         if torch.is_tensor(self.eligibility_trace):

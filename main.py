@@ -8,6 +8,7 @@ import queue  # Add missing queue import
 import types  # Add types import at the beginning with other imports
 from continues import AdaptiveExponentialLIFNeuron, RewardModulatedSTDPSynapse, NeuralModule, ContinuouslyAdaptingNeuralSystem
 import random
+from collections import deque
 class PerceptionModule(NeuralModule):
     """Module that processes sensory input"""
     def __init__(self, input_size=10, hidden_size=20, output_size=5):
@@ -145,16 +146,14 @@ class Visualizer:
         # Calculate cross-module activity
         cross_module_activity = 0.0
         if hasattr(self.neural_system, 'cross_module_connections') and self.neural_system.cross_module_connections:
-            # Calculate activity based on weight changes and signal transmission across modules
             cross_activity_signals = []
             for key, synapse in self.neural_system.cross_module_connections.items():
-                # Track recent weight changes as a measure of cross-module activity
-                if hasattr(synapse, 'recent_weight_changes'):
-                    cross_activity_signals.append(abs(synapse.recent_weight_changes))
+                # Use the weight history difference if available
+                if hasattr(synapse, 'weight_history') and len(synapse.weight_history) >= 2:
+                    delta = abs(synapse.weight_history[-1] - synapse.weight_history[-2])
+                    cross_activity_signals.append(delta)
                 else:
-                    # If no weight change tracking, use current weight as approximation
                     cross_activity_signals.append(abs(synapse.weight.item()))
-            
             cross_module_activity = np.mean(cross_activity_signals) if cross_activity_signals else 0.0
         
         # Store cross-module activity in neural system for reference
@@ -349,6 +348,22 @@ class SimpleEnvironment:
         self.reward = 0
         self.is_running = False
         self.thread = None
+        
+        # Add target patterns for different scenarios
+        self.targets = {
+            'simple': np.array([0.7, 0.3, 0.9]),
+            'medium': np.array([0.2, 0.8, 0.5]),
+            'complex': np.array([0.9, 0.1, 0.6])
+        }
+        self.current_target_name = 'simple'
+        self.current_target = self.targets[self.current_target_name]
+        
+        # Track performance history
+        self.reward_history = deque(maxlen=100)
+        self.action_history = deque(maxlen=10)
+        self.best_reward = 0
+        self.time_on_current_target = 0
+        self.target_switch_threshold = 300  # Switch targets after this many iterations
     
     def start(self):
         """Start environment simulation in separate thread"""
@@ -380,14 +395,33 @@ class SimpleEnvironment:
             try:
                 module_name, action = self.neural_system.action_queue.get(timeout=0.1)
                 
-                # 4. Compute reward based on action
-                # Simple reward: encourage action values to match a target pattern
-                target_pattern = np.array([0.7, 0.3, 0.9])
-                action_array = np.array(action)
+                # Convert binary spikes to continuous action values if needed
+                action_array = np.array([float(a) for a in action])
                 
-                # Distance-based reward (closer to target = higher reward)
-                distance = np.sum(np.abs(target_pattern - action_array))
-                self.reward = max(0, 1 - distance/len(target_pattern))
+                # Store action for history analysis
+                self.action_history.append(action_array)
+                
+                # Occasionally switch targets when progress stalls or time threshold reached
+                self.time_on_current_target += 1
+                if self.time_on_current_target > self.target_switch_threshold:
+                    self._switch_target()
+                
+                # 4. Compute reward based on dynamic factors
+                reward = self._calculate_reward(action_array)
+                self.reward_history.append(reward)
+                
+                # Adjust reward based on improvement over time
+                if len(self.reward_history) > 10:
+                    recent_avg = np.mean(list(self.reward_history)[-10:])
+                    older_avg = np.mean(list(self.reward_history)[-20:-10]) if len(self.reward_history) >= 20 else 0
+                    
+                    # Reward improvement over time (bonus for getting better)
+                    improvement = max(0, recent_avg - older_avg)
+                    reward += improvement * 0.5  # Bonus for improvement
+                
+                # Track best reward
+                self.best_reward = max(self.best_reward, reward)
+                self.reward = reward  # Update current reward
                 
                 # Send reward signal back to the system
                 if module_name in self.neural_system.modules_dict:
@@ -396,14 +430,64 @@ class SimpleEnvironment:
                     signals = np.zeros(module.input_size)
                     signals[0] = self.reward  # Use first input as reward channel
                     self.neural_system.process_sensory_input(signals, module_name)
-                    # Pass the same reward signals to association, so upstream synapses can learn
-                    self.neural_system.process_sensory_input(signals, "association")
                     
-            except queue.Empty:  # Now queue should be properly recognized
+                    # Pass the reward signals to association, so upstream synapses can learn
+                    assoc_signals = np.zeros(self.neural_system.modules_dict["association"].input_size)
+                    assoc_signals[0] = self.reward
+                    self.neural_system.process_sensory_input(assoc_signals, "association")
+                    
+                    # Print reward info occasionally for monitoring
+                    if random.random() < 0.05:  # ~5% of the time to avoid console spam
+                        print(f"Target: {self.current_target_name}, Action: {action_array.round(2)}, " 
+                              f"Reward: {reward:.3f}, Best: {self.best_reward:.3f}")
+                    
+            except queue.Empty:
                 # No action output yet
                 pass
                 
             time.sleep(0.05)  # 50ms timestep
+    
+    def _calculate_reward(self, action_array):
+        """Calculate reward based on action and current target"""
+        # Basic distance-based reward
+        distance = np.sum(np.abs(self.current_target - action_array))
+        base_reward = max(0, 1 - distance/len(self.current_target))
+        
+        # Add noise to avoid getting stuck at local optima
+        noise = np.random.normal(0, 0.05)  # Small random noise
+        
+        # Add variability based on recent actions (reward exploration)
+        exploration_bonus = 0.0
+        if len(self.action_history) >= 2:
+            # Calculate variance in recent actions (reward for trying different things)
+            action_variance = np.mean([np.var([a[i] for a in self.action_history]) 
+                                      for i in range(len(action_array))])
+            exploration_bonus = min(0.15, action_variance * 2.0)  # Cap at 0.15
+        
+        # Combine reward components
+        reward = base_reward + noise + exploration_bonus
+        return min(1.0, max(0.0, reward))  # Clamp between 0 and 1
+    
+    def _switch_target(self):
+        """Switch to a different target pattern"""
+        previous_target = self.current_target_name
+        targets = list(self.targets.keys())
+        
+        # Choose a different target than the current one
+        available_targets = [t for t in targets if t != self.current_target_name]
+        self.current_target_name = random.choice(available_targets)
+        self.current_target = self.targets[self.current_target_name]
+        
+        print(f"Switching target from {previous_target} to {self.current_target_name}: {self.current_target}")
+        self.time_on_current_target = 0
+        
+        # Adjust target switch threshold based on performance
+        if self.best_reward > 0.8:
+            # If doing well, make it more challenging by switching more often
+            self.target_switch_threshold = max(100, self.target_switch_threshold - 50)
+        else:
+            # If struggling, give more time on each target
+            self.target_switch_threshold = min(500, self.target_switch_threshold + 50)
 
 def main():
     """Main function to set up and run the neural system"""
