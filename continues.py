@@ -424,6 +424,8 @@ class NeuralModule(nn.Module):
                 input_spikes.append(should_spike)
             else:
                 # Handle scalar case
+                if isinstance(signal, (tuple, list)):
+                    signal = signal[0]  # Extract the first element if it's a tuple or list
                 if signal > 0 and random.random() < signal:  # Probabilistic spiking
                     spike = 1.0
                 else:
