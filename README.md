@@ -263,6 +263,9 @@ class Visualizer:
         self.time_points = []
 ```
 
+![BioNet Visualizer Screenshot](assets/screenshot.png)
+*Screenshot of BioNet's visualization interface showing neural activity, network structure, and learning metrics in real-time.*
+
 ## Development Guide
 
 ### Codebase Organization
