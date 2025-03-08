@@ -406,4 +406,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the Non-Commercial License - see the LICENSE.md file for details. This software may be used for educational and research purposes only and may not be used for any commercial purposes.
