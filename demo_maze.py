@@ -16,8 +16,8 @@ import random
 NEURON_THRESHOLD = -55.0           # mV - membrane potential threshold for firing
 NEURON_REST_POTENTIAL = -65.0      # mV - resting membrane potential
 NEURON_RESET_POTENTIAL = -70.0     # mV - after-spike reset potential
-NEURON_LEAK_CONSTANT = 0.9         # decay factor toward rest potential
-NEURON_ADAPTATION_CONSTANT = 0.2   # increment to adaptation current after spike
+NEURON_LEAK_CONSTANT = 0.95         # decay factor toward rest potential
+NEURON_ADAPTATION_CONSTANT = 0.15   # increment to adaptation current after spike
 NEURON_REFRACTORY_PERIOD = 5       # time steps neuron is unresponsive after spike
 NEURON_ADAPTATION_DECAY = 0.95     # decay rate for adaptation current
 NEURON_TARGET_FIRING_RATE = 0.01   # target activity level for homeostasis
@@ -39,9 +39,9 @@ SYNAPSE_NOISE_FACTOR = 0.01        # small random noise for eligibility
 
 # SYNAPSE WEIGHT INITIALIZATION
 # ----------------------------
-SYNAPSE_INIT_MIN_WEIGHT = 3.0      # min weight for new synapses (mV)
-SYNAPSE_INIT_MAX_WEIGHT = 7.0      # max weight for new synapses (mV)
-SYNAPSE_MAX_WEIGHT = 15.0          # max weight allowed during learning
+SYNAPSE_INIT_MIN_WEIGHT = 6.0      # min weight for new synapses (mV)
+SYNAPSE_INIT_MAX_WEIGHT = 12.0      # max weight for new synapses (mV)
+SYNAPSE_MAX_WEIGHT = 20.0          # max weight allowed during learning
 
 # NETWORK ARCHITECTURE
 # ------------------
@@ -63,7 +63,7 @@ STRUCTURAL_PLASTICITY_MAX_NEW_CONNECTIONS = 5 # max new connections per update
 TRAINING_NUM_EPISODES = 20         # number of training episodes
 TRAINING_MAX_STEPS_PER_EPISODE = 50 # maximum steps per episode
 
-PERCEPT_SCALING = 20.0  # Scale factor to bring percepts into proper mV range
+PERCEPT_SCALING = 70.0  # Scale factor to bring percepts into proper mV range
 
 class AdaptiveExponentialLIFNeuron(nn.Module):
     """
@@ -284,14 +284,14 @@ class RewardModulatedSTDPSynapse(nn.Module):
         
         # Check if post-synaptic neuron fired (handle both scalar and tensor cases)
         if isinstance(post_spike, torch.Tensor) and post_spike.numel() > 1:
-            if torch.any(post_spike > 0):  # Fix: Changed post_spike.any() > 0 to torch.any(post_spike > 0)
+            if torch.any(post_spike > 0):
                 stdp_update += self.a_plus * self.pre_trace
         elif post_spike > 0:  # Scalar or single-element tensor case
             stdp_update += self.a_plus * self.pre_trace
         
         # Check if pre-synaptic neuron fired (handle both scalar and tensor cases)
         if isinstance(pre_spike, torch.Tensor) and pre_spike.numel() > 1:
-            if torch.any(pre_spike > 0):  # Fix: Changed pre_spike.any() > 0 to torch.any(pre_spike > 0)
+            if torch.any(pre_spike > 0):
                 stdp_update -= self.a_minus * self.post_trace
         elif pre_spike > 0:  # Scalar or single-element tensor case
             stdp_update -= self.a_minus * self.post_trace
@@ -299,8 +299,20 @@ class RewardModulatedSTDPSynapse(nn.Module):
         # Add noise on the correct device
         noise = torch.randn(1, device=self.device).item() * SYNAPSE_NOISE_FACTOR  # Small random noise
         
-        # Update eligibility trace (candidate for weight change)
-        self.eligibility_trace = self.eligibility_trace * self.eligibility_decay + stdp_update + noise
+        # Store source layer and index for wall detection (add these as instance variables)
+        if hasattr(self, 'source_layer') and self.source_layer == 'input' and hasattr(self, 'source_idx') and self.source_idx < 8:
+            # Check if this synapse is from a wall-detecting input neuron
+            from_wall = False
+            if hasattr(self, 'last_percept_value') and self.last_percept_value < 0:
+                from_wall = True
+                # Enhanced eligibility trace for wall learning
+                self.eligibility_trace = self.eligibility_trace * self.eligibility_decay + stdp_update * 1.5 + noise
+            else:
+                # Normal eligibility trace update
+                self.eligibility_trace = self.eligibility_trace * self.eligibility_decay + stdp_update + noise
+        else:
+            # Normal eligibility trace update for non-input synapses
+            self.eligibility_trace = self.eligibility_trace * self.eligibility_decay + stdp_update + noise
         
         # Store for debugging
         self.last_eligibility_value = float(self.eligibility_trace) if torch.is_tensor(self.eligibility_trace) else self.eligibility_trace
@@ -312,13 +324,6 @@ class RewardModulatedSTDPSynapse(nn.Module):
         """Apply reward-modulated weight change using eligibility trace"""
         if not self.enabled:
             return
-            
-        # Modified: Force a minimum eligibility value when trace is too small
-        # This ensures rewards always cause meaningful weight changes
-        if abs(self.eligibility_trace) < 0.1:
-            # Use the sign of the existing trace if available, otherwise random sign
-            sign = 1.0 if self.eligibility_trace > 0 else (-1.0 if self.eligibility_trace < 0 else (1.0 if random.random() > 0.5 else -1.0))
-            self.eligibility_trace = sign * 0.1  # Force substantial eligibility for effective learning
             
         # Convert to float if tensor to avoid gradient tracking issues
         if torch.is_tensor(self.eligibility_trace):
@@ -406,8 +411,11 @@ class MazeBrain(nn.Module):
         ])
         
         # Output neurons (all excitatory)
+        # Reduce threshold for output neurons to encourage more firing
         self.output_neurons = nn.ModuleList([
-            AdaptiveExponentialLIFNeuron(**self.neuron_kwargs) for _ in range(self.output_size)
+            AdaptiveExponentialLIFNeuron(
+                **{**self.neuron_kwargs, 'threshold': NEURON_THRESHOLD * 0.9}) 
+            for _ in range(self.output_size)
         ])
         
         # Create synapses
@@ -440,22 +448,30 @@ class MazeBrain(nn.Module):
 
 
     def _create_synapse(self, source_layer, source_idx, target_layer, target_idx, initial_weight=None):
-        # Calculate appropriate weight range based on neuron parameters
-        # For signals to reach threshold: need weights that can move membrane potential from
-        # rest_potential (-65.0) toward threshold (-55.0)
+        # Get the source neuron to check if it's excitatory or inhibitory
+        source_neuron = self._get_neuron(source_layer, source_idx)
         
         if initial_weight is None:
-            # Weights calibrated to move membrane potential by a larger fraction of the distance
-            # from rest to threshold in a single input
-            initial_weight = random.uniform(SYNAPSE_INIT_MIN_WEIGHT, SYNAPSE_INIT_MAX_WEIGHT)
+            # Increase initial weights to drive more activity
+            base_weight = random.uniform(SYNAPSE_INIT_MIN_WEIGHT * 1.2, SYNAPSE_INIT_MAX_WEIGHT * 1.2)
+            
+            # If source neuron is inhibitory, make weight negative with appropriate strength
+            if hasattr(source_neuron, 'excitatory') and not source_neuron.excitatory:
+                initial_weight = -base_weight * 1.5  # Make inhibitory neurons slightly stronger
+            else:
+                initial_weight = base_weight
         
         synapse = RewardModulatedSTDPSynapse(
             initial_weight=initial_weight,
-            max_weight=SYNAPSE_MAX_WEIGHT,
-            min_weight=SYNAPSE_MIN_WEIGHT,
+            max_weight=SYNAPSE_MAX_WEIGHT if initial_weight >= 0 else -SYNAPSE_MIN_WEIGHT,
+            min_weight=SYNAPSE_MIN_WEIGHT if initial_weight >= 0 else -SYNAPSE_MAX_WEIGHT,
             synapse_id=self.next_synapse_id,
             device=self.device
         )
+        synapse.source_layer = source_layer
+        synapse.source_idx = source_idx
+        synapse.target_layer = target_layer
+        synapse.target_idx = target_idx
         self.next_synapse_id += 1
         key = (source_layer, source_idx, target_layer, target_idx)
         self.synapses[key] = synapse
@@ -479,10 +495,20 @@ class MazeBrain(nn.Module):
         # 1. Process Input Layer (Percepts)
         input_spikes = []
         for i, percept in enumerate(percepts):
-            # Scale percept values to proper voltage range
-            scaled_percept = percept * PERCEPT_SCALING
+            # Walls (-1) become inhibitory but not extreme, exits (1) become excitatory
+            if percept < 0:  # Wall
+                scaled_percept = -25.0  # Reduced inhibition (was -40.0)
+            elif percept > 0:  # Exit
+                scaled_percept = 30.0  # Fixed value instead of scaling
+            else:  # Free space (0)
+                scaled_percept = 0
             spike, _ = self.input_neurons[i](scaled_percept, self.time_step)
             input_spikes.append(spike)
+            # Store percept value in all synapses coming from this input neuron
+            for h in range(self.hidden_size):
+                key = ('input', i, 'hidden', h)
+                if key in self.synapses:
+                    self.synapses[key].last_percept_value = percept
 
         # 2. Process Hidden Layer
         hidden_inputs = [0.0] * self.hidden_size
@@ -535,11 +561,13 @@ class MazeBrain(nn.Module):
 
         # 4. Choose Action (Highest spiking output neuron)
         if any(output_spikes):  # Check if any output neuron fired
-            action_index = output_spikes.index(max(output_spikes))
-            self.last_action = action_index #Up, Down, Left, Right
+            max_activation = max(output_spikes)
+            max_indices = [i for i, spike in enumerate(output_spikes) if spike == max_activation]
+            action_index = random.choice(max_indices)  # Randomly select among maximum activations
+            self.last_action = action_index  # Up, Down, Left, Right
         else:
-            action_index = None  # No action, or random choice if needed
-            self.last_action = None
+            action_index = random.randint(0, 3)  # Take random action instead of returning None
+            self.last_action = action_index
 
         # 5. Learning and Update
         self._update_synapse_traces(input_spikes, hidden_spikes, output_spikes)
@@ -557,8 +585,6 @@ class MazeBrain(nn.Module):
         # Perform structural plasticity (synaptogenesis & pruning)
         if self.time_step % STRUCTURAL_PLASTICITY_CHECK_INTERVAL == 0:  # Check every 1000 time steps
             self._structural_plasticity()
-        print("Action Index: ", action_index)
-        print("Output Spikes: ", output_spikes)
         return action_index
 
     def connect_to_environment(self, env):
@@ -585,9 +611,26 @@ class MazeBrain(nn.Module):
                     self.synapses[key].update_traces(hidden_spikes[h], output_spikes[o], self.time_step)
 
     def _apply_reward(self, reward_signal):
-        for synapse in self.synapses.values():
-            synapse.apply_reward(reward_signal)
+        # For negative rewards (wall hits), strengthen learning
+        reward_multiplier = 2.0 if reward_signal < 0 else 1.0
+        
+        for key, synapse in self.synapses.items():
+            source_layer, source_idx, target_layer, target_idx = key
             
+            # Apply stronger learning for wall avoidance
+            if reward_signal < 0:
+                # Stronger penalty for the action that led to wall collision
+                if target_layer == 'output' and target_idx == self.last_action:
+                    synapse.apply_reward(reward_signal * 2.5 * reward_multiplier)
+                else:
+                    synapse.apply_reward(reward_signal * 0.8 * reward_multiplier)
+            else:
+                # Regular reward processing for positive/neutral rewards
+                if target_layer == 'output' and target_idx == self.last_action:
+                    synapse.apply_reward(reward_signal * 1.5)
+                else:
+                    synapse.apply_reward(reward_signal * 0.8)
+
     def _structural_plasticity(self):
         """Implement structural plasticity: pruning and synaptogenesis"""
         # Count current connections for density calculation

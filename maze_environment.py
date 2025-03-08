@@ -94,24 +94,25 @@ class MazeEnvironment:
         self.exit = (width - 2, height - 2)
         self.position = self.start
         
-        # Pygame related attributes
-        self.cell_size = cell_size
-        self.width = len(self.maze[0]) * cell_size
-        self.height = len(self.maze) * cell_size
+        # Set fixed display dimensions
+        total_display_width = 1280
+        total_display_height = 960
+        # Allocate 30% width for maze viz and 70% for neural network
+        maze_panel_width = int(total_display_width * 0.30)   # ≈384px
+        self.cell_size = int(maze_panel_width / self.maze_width)  # adjust cell size to fit maze panel
+        self.width = maze_panel_width  # maze viz width
         
-        # Neural network visualization parameters
-        self.nn_width = 600
-        self.nn_height = 400
+        self.nn_width = total_display_width - maze_panel_width  # neural network gets remaining 70%
+        self.nn_height = total_display_height
         self.nn_margin = 50
-        
-        # Total display size
-        self.display_width = self.width + self.nn_width
-        self.display_height = max(self.height, self.nn_height)
+     
+        self.display_width = total_display_width
+        self.display_height = total_display_height
         
         # Synapse visualization
         self.firing_synapses = deque(maxlen=20)  # Store recently fired synapses
         
-        # Initialize pygame
+        # Initialize pygame with fixed window size
         pygame.init()
         self.screen = pygame.display.set_mode((self.display_width, self.display_height))
         pygame.display.set_caption("Neural Maze Environment")
@@ -302,6 +303,11 @@ class MazeEnvironment:
         pygame.draw.rect(self.screen, (240, 240, 240), nn_rect)
         pygame.draw.rect(self.screen, BLACK, nn_rect, 2)
         
+        # Title for the neural network display
+        title_font = pygame.font.SysFont("Arial", 16, bold=True)
+        title_text = title_font.render("Neural Network - Real-time Activity", True, BLACK)
+        self.screen.blit(title_text, (self.width + 10, 10))
+        
         # Get neuron counts from brain
         input_size = len(self.brain.input_neurons)
         hidden_size = len(self.brain.hidden_neurons)
@@ -312,10 +318,20 @@ class MazeEnvironment:
         hidden_spacing = self.nn_height / (hidden_size + 1)
         output_spacing = self.nn_height / (output_size + 1)
         
-        # Layer x-positions
-        input_x = self.width + self.nn_margin
-        hidden_x = self.width + self.nn_width / 2
-        output_x = self.width + self.nn_width - self.nn_margin
+        # Layer x-positions - distribute more evenly
+        input_x = self.width + self.nn_margin + 50
+        hidden_x = self.width + (self.nn_width / 2)
+        output_x = self.width + self.nn_width - self.nn_margin - 50
+        
+        # Draw layer labels
+        layer_font = pygame.font.SysFont("Arial", 14, bold=True)
+        input_layer_text = layer_font.render("Input Layer", True, BLACK)
+        hidden_layer_text = layer_font.render("Hidden Layer", True, BLACK)
+        output_layer_text = layer_font.render("Output Layer", True, BLACK)
+        
+        self.screen.blit(input_layer_text, (input_x - input_layer_text.get_width()//2, 40))
+        self.screen.blit(hidden_layer_text, (hidden_x - hidden_layer_text.get_width()//2, 40))
+        self.screen.blit(output_layer_text, (output_x - output_layer_text.get_width()//2, 40))
         
         # Store neuron positions for synapse drawing
         input_positions = []
@@ -328,48 +344,48 @@ class MazeEnvironment:
         
         # Draw input neurons
         for i in range(input_size):
-            pos_y = (i + 1) * input_spacing
+            pos_y = (i + 1) * input_spacing + 20  # Add offset for layer labels
             pos = (input_x, pos_y)
             input_positions.append(pos)
             
             # Get activation value from neuron membrane potential
             value = self.brain.input_neurons[i].membrane_potential
             # Normalize value for visualization
-            value = min(1.0, max(0, (value + 65.0) / 66.0))
+            norm_value = min(1.0, max(0, (value + 65.0) / 66.0))
             
-            # Draw neuron
-            self.draw_neuron(pos, value, f"In {i}", i < 4)
-            
-            # Label with percept value
+            # Get additional neuron info for display
             percepts = self.get_state()
-            if i < len(percepts):
-                text = self.font.render(f"P{i}: {percepts[i]}", True, BLACK)
-                self.screen.blit(text, (pos[0] - 40, pos[1] + 15))
+            percept_value = percepts[i] if i < len(percepts) else "N/A"
+            
+            # Draw neuron with extended info
+            self.draw_neuron(pos, value, norm_value, f"In {i}", i < 4, 
+                            extra_info=[f"Percept: {percept_value}", f"MP: {value:.2f}mV"])
         
         # Draw hidden neurons
         for i in range(hidden_size):
-            pos_y = (i + 1) * hidden_spacing
+            pos_y = (i + 1) * hidden_spacing + 20  # Add offset for layer labels
             pos = (hidden_x, pos_y)
             hidden_positions.append(pos)
             
             # Get activation value
             value = self.brain.hidden_neurons[i].membrane_potential
             # Normalize value for visualization
-            value = min(1.0, max(0, (value + 65.0) / 66.0))
+            norm_value = min(1.0, max(0, (value + 65.0) / 66.0))
             
-            # Draw neuron
-            self.draw_neuron(pos, value, f"H{i}")
+            # Draw neuron with membrane potential info
+            self.draw_neuron(pos, value, norm_value, f"H{i}", False,
+                           extra_info=[f"MP: {value:.2f}mV"])
         
         # Draw output neurons
         for i in range(output_size):
-            pos_y = (i + 1) * output_spacing
+            pos_y = (i + 1) * output_spacing + 20  # Add offset for layer labels
             pos = (output_x, pos_y)
             output_positions.append(pos)
             
             # Get activation value
             value = self.brain.output_neurons[i].membrane_potential
             # Normalize value for visualization
-            value = min(1.0, max(0, (value + 65.0) / 66.0))
+            norm_value = min(1.0, max(0, (value + 65.0) / 66.0))
             
             # Check if this was the last selected action
             highlight = (self.brain.last_action == i)
@@ -378,13 +394,52 @@ class MazeEnvironment:
             direction_labels = ["Up", "Down", "Left", "Right"]
             label = direction_labels[i] if i < len(direction_labels) else f"Out {i}"
             
-            # Draw neuron
-            self.draw_neuron(pos, value, label, highlight)
+            # Draw neuron with action indication
+            action_info = "ACTIVE" if highlight else ""
+            self.draw_neuron(pos, value, norm_value, label, highlight,
+                            extra_info=[f"MP: {value:.2f}mV", action_info])
+            
+        # Draw legend
+        self.draw_neural_network_legend(self.width + 10, self.nn_height - 90)
     
-    def draw_neuron(self, pos, value, label=None, highlight=False):
+    def draw_neural_network_legend(self, x, y):
+        """Draw a legend for the neural network visualization"""
+        legend_font = pygame.font.SysFont("Arial", 12)
+        
+        # Legend box
+        legend_rect = pygame.Rect(x, y, self.nn_width - 20, 80)
+        pygame.draw.rect(self.screen, (245, 245, 245), legend_rect)
+        pygame.draw.rect(self.screen, BLACK, legend_rect, 1)
+        
+        # Legend title
+        title = legend_font.render("Legend:", True, BLACK)
+        self.screen.blit(title, (x + 5, y + 5))
+        
+        # Neuron activity legend
+        pygame.draw.circle(self.screen, (0, 0, 255), (x + 15, y + 25), 7)  # Inactive
+        pygame.draw.circle(self.screen, (255, 0, 0), (x + 15, y + 45), 7)  # Active
+        inactive_text = legend_font.render("Inactive neuron (-70mV)", True, BLACK)
+        active_text = legend_font.render("Active neuron (-55mV+)", True, BLACK)
+        self.screen.blit(inactive_text, (x + 30, y + 20))
+        self.screen.blit(active_text, (x + 30, y + 40))
+        
+        # Synapse legend
+        pygame.draw.line(self.screen, (0, 200, 0), (x + 200, y + 25), (x + 230, y + 25), 3)
+        pygame.draw.line(self.screen, (200, 0, 0), (x + 200, y + 45), (x + 230, y + 45), 3)
+        positive_text = legend_font.render("Excitatory synapse (positive weight)", True, BLACK)
+        negative_text = legend_font.render("Inhibitory synapse (negative weight)", True, BLACK)
+        self.screen.blit(positive_text, (x + 240, y + 20))
+        self.screen.blit(negative_text, (x + 240, y + 40))
+        
+        # Active synapse
+        pygame.draw.line(self.screen, YELLOW, (x + 200, y + 65), (x + 230, y + 65), 4)
+        active_synapse_text = legend_font.render("Recently fired synapse", True, BLACK)
+        self.screen.blit(active_synapse_text, (x + 240, y + 60))
+    
+    def draw_neuron(self, pos, value, norm_value, label=None, highlight=False, extra_info=None):
         """Draw a neuron circle with color based on activation"""
         x, y = pos
-        radius = 10
+        radius = 12  # Slightly larger for better visibility
         
         # Convert tensor to scalar if needed
         if isinstance(value, torch.Tensor):
@@ -393,22 +448,6 @@ class MazeEnvironment:
             except:
                 value = value.mean().item() if value.numel() > 0 else 0.0
         
-        # Get neuron parameters for normalization directly from the brain
-        if self.brain and len(self.brain.input_neurons) > 0:
-            # Get parameters directly from the brain's neuron_kwargs
-            rest = self.brain.neuron_kwargs['rest_potential']
-            reset = self.brain.neuron_kwargs['reset_potential']
-            threshold = self.brain.neuron_kwargs['threshold']
-            
-            # Calculate norm_value without the special case for value==0
-            # This ensures neurons with low activity are properly visualized
-            total_range = threshold - reset
-            relative_to_reset = value - reset
-            norm_value = min(1.0, max(0.0, relative_to_reset / total_range))
-        else:
-            # Fallback
-            norm_value = 0.5
-        
         # Generate color gradient: blue (0.0) to red (1.0)
         color = (
             int(255 * norm_value),          # Red increases with value
@@ -416,19 +455,48 @@ class MazeEnvironment:
             int(255 * (1.0 - norm_value))   # Blue decreases with value
         )
         
-        # Draw the neuron
+        # Draw neuron body
         pygame.draw.circle(self.screen, color, (int(x), int(y)), radius)
-        pygame.draw.circle(self.screen, BLACK, (int(x), int(y)), radius, 1)
         
-        # Show actual membrane potential value instead of normalized value
-        debug_font = pygame.font.SysFont("Arial", 9)
-        value_text = debug_font.render(f"{value:.2f}", True, BLACK)
-        self.screen.blit(value_text, (x - 10, y + 15))
+        # Draw thicker border for active neurons or highlighted neurons
+        border_width = 3 if highlight else 1
+        border_color = ORANGE if highlight else BLACK
+        pygame.draw.circle(self.screen, border_color, (int(x), int(y)), radius, border_width)
         
         # Add label if provided
         if label:
-            text = self.font.render(label, True, BLACK)
-            self.screen.blit(text, (x - 10, y - 25))
+            label_font = pygame.font.SysFont("Arial", 11, bold=True)
+            text = label_font.render(label, True, BLACK)
+            self.screen.blit(text, (x - text.get_width() // 2, y - radius - 20))
+        
+        # Add extra info if provided
+        if extra_info:
+            info_font = pygame.font.SysFont("Arial", 10)
+            for i, info in enumerate(extra_info):
+                if info:  # Only display non-empty strings
+                    text = info_font.render(info, True, BLACK)
+                    # Create a small background for text
+                    text_bg = pygame.Rect(
+                        x - text.get_width() // 2 - 2,
+                        y + radius + 2 + i * 15,
+                        text.get_width() + 4,
+                        text.get_height()
+                    )
+                    pygame.draw.rect(self.screen, (240, 240, 240), text_bg)
+                    pygame.draw.rect(self.screen, (200, 200, 200), text_bg, 1)
+                    # Display text
+                    self.screen.blit(text, (x - text.get_width() // 2, y + radius + 2 + i * 15))
+
+        # Draw threshold indicator line inside neuron
+        threshold = self.brain.neuron_kwargs['threshold'] if self.brain else -55
+        rest = self.brain.neuron_kwargs['rest_potential'] if self.brain else -70
+        total_range = threshold - rest
+        # Show threshold as a small mark inside the neuron
+        if total_range > 0:
+            threshold_y = y - int((threshold - rest) / total_range * radius * 0.8)
+            pygame.draw.line(self.screen, (50, 50, 50), 
+                            (x - radius + 2, threshold_y), 
+                            (x + radius - 2, threshold_y), 1)
     
     def draw_synapses(self, input_x, input_spacing, hidden_x, hidden_spacing, 
                      output_x, output_spacing):
@@ -446,21 +514,23 @@ class MazeEnvironment:
             target_pos = None
             
             if source_layer == 'input':
-                source_pos = (input_x, (source_idx + 1) * input_spacing)
+                source_pos = (input_x, (source_idx + 1) * input_spacing + 20)  # +20 for layer label offset
             elif source_layer == 'hidden':
-                source_pos = (hidden_x, (source_idx + 1) * hidden_spacing)
+                source_pos = (hidden_x, (source_idx + 1) * hidden_spacing + 20)
                 
             if target_layer == 'hidden':
-                target_pos = (hidden_x, (target_idx + 1) * hidden_spacing)
+                target_pos = (hidden_x, (target_idx + 1) * hidden_spacing + 20)
             elif target_layer == 'output':
-                target_pos = (output_x, (target_idx + 1) * output_spacing)
+                target_pos = (output_x, (target_idx + 1) * output_spacing + 20)
                 
             if source_pos and target_pos:
                 # Normalize weight based on configurable divisor to scale mV values
                 norm_weight = abs(weight) / SYNAPSE_VISUAL_WEIGHT_DIVISOR
-                norm_weight = max(0.0, min(1.0, norm_weight))
+                norm_weight = max(0.1, min(1.0, norm_weight))  # Ensure minimum visibility
+                
                 # Determine line width using configurable scale factor
                 width = max(1, int(norm_weight * SYNAPSE_VISUAL_WIDTH_SCALE))
+                
                 # Use red for negative weights and green for positive weights
                 if weight >= 0:
                     color = (0, int(200 * norm_weight), 0)
@@ -472,16 +542,78 @@ class MazeEnvironment:
                     # Highlight firing synapses with yellow and slightly increase width
                     color = YELLOW
                     width += 1
-                    
-                pygame.draw.line(self.screen, color, source_pos, target_pos, width)
-                # Draw weight label at the midpoint of the synapse
-                mid_x = (source_pos[0] + target_pos[0]) / 2
-                mid_y = (source_pos[1] + target_pos[1]) / 2
-                weight_text = self.font.render(f"{weight:.2f}", True, BLACK)
-                text_bg = pygame.Rect(mid_x - 15, mid_y - 8, 30, 16)
+                
+                # Draw synapse line with slight curve for better visualization
+                control_point = (
+                    (source_pos[0] + target_pos[0]) / 2,
+                    (source_pos[1] + target_pos[1]) / 2 + (10 if random.random() > 0.5 else -10)
+                )
+                
+                # Draw curved line approximation using multiple short lines
+                points = []
+                steps = 20
+                for i in range(steps + 1):
+                    t = i / steps
+                    # Quadratic Bezier curve
+                    x = (1-t)**2 * source_pos[0] + 2*(1-t)*t * control_point[0] + t**2 * target_pos[0]
+                    y = (1-t)**2 * source_pos[1] + 2*(1-t)*t * control_point[1] + t**2 * target_pos[1]
+                    points.append((x, y))
+                
+                # Draw segmented line for curve effect
+                for i in range(len(points) - 1):
+                    pygame.draw.line(self.screen, color, points[i], points[i+1], width)
+                
+                # Draw weight label at the midpoint
+                mid_point = points[len(points)//2]
+                weight_font = pygame.font.SysFont("Arial", 10)
+                weight_text = weight_font.render(f"{weight:.2f}", True, BLACK)
+                
+                # Create background for weight text
+                text_bg = pygame.Rect(
+                    mid_point[0] - weight_text.get_width()//2 - 2,
+                    mid_point[1] - weight_text.get_height()//2 - 1,
+                    weight_text.get_width() + 4,
+                    weight_text.get_height() + 2
+                )
                 pygame.draw.rect(self.screen, WHITE, text_bg)
-                self.screen.blit(weight_text, (mid_x - weight_text.get_width() // 2,
-                                               mid_y - weight_text.get_height() // 2))
+                pygame.draw.rect(self.screen, (200, 200, 200), text_bg, 1)
+                
+                # Draw weight text
+                self.screen.blit(weight_text, (
+                    mid_point[0] - weight_text.get_width()//2,
+                    mid_point[1] - weight_text.get_height()//2
+                ))
+                
+                # Draw small arrow at the target end
+                if len(points) > 2:
+                    end_segment = (points[-2], points[-1])
+                    self.draw_arrow_head(end_segment[1], end_segment[0], color, width)
+
+    def draw_arrow_head(self, pos, prev_pos, color, width):
+        """Draw a small arrow head at the end of a synapse"""
+        # Calculate direction vector
+        dx = pos[0] - prev_pos[0]
+        dy = pos[1] - prev_pos[1]
+        
+        # Normalize
+        length = math.sqrt(dx*dx + dy*dy)
+        if length < 0.0001:  # Avoid division by zero
+            return
+            
+        dx, dy = dx/length, dy/length
+        
+        # Calculate perpendicular vector
+        px, py = -dy, dx
+        
+        # Calculate arrow points
+        arrow_size = width + 4
+        p1 = (pos[0] - dx*arrow_size - px*arrow_size/2, 
+              pos[1] - dy*arrow_size - py*arrow_size/2)
+        p2 = (pos[0] - dx*arrow_size + px*arrow_size/2, 
+              pos[1] - dy*arrow_size + py*arrow_size/2)
+              
+        # Draw arrow head
+        pygame.draw.polygon(self.screen, color, [pos, p1, p2])
     
     def register_synapse_firing(self, source_layer, source_idx, target_layer, target_idx):
         """Record a synapse that has just fired (for visualization)"""
