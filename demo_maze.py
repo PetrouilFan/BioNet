@@ -7,6 +7,7 @@ import queue
 import matplotlib.pyplot as plt
 from collections import deque
 import random
+from maze_environment import MazeGame, MazeVisualization  # changed import
 
 # GLOBAL CONFIGURATION PARAMETERS
 # ==============================
@@ -23,7 +24,7 @@ NEURON_ADAPTATION_DECAY = 0.95     # decay rate for adaptation current
 NEURON_TARGET_FIRING_RATE = 0.01   # target activity level for homeostasis
 NEURON_HOMEOSTATIC_TIME_CONSTANT = 1000  # time window for rate estimation
 NEURON_HOMEOSTATIC_LEARNING_RATE = 0.001 # learning rate for threshold adaptation
-
+NEURON_REFACTORY_PERIOD = 5        # refractory period for neurons
 # SYNAPSE PARAMETERS
 # -----------------
 SYNAPSE_LEARNING_RATE = 0.01        # base learning rate
@@ -72,7 +73,7 @@ class AdaptiveExponentialLIFNeuron(nn.Module):
     """
     def __init__(self, threshold=NEURON_THRESHOLD, rest_potential=NEURON_REST_POTENTIAL, 
                  reset_potential=NEURON_RESET_POTENTIAL, leak_constant=NEURON_LEAK_CONSTANT, 
-                 adaptation_constant=NEURON_ADAPTATION_CONSTANT, refractory_period=NEURON_REFRACTORY_PERIOD,
+                 adaptation_constant=NEURON_ADAPTATION_CONSTANT, refractory_period=NEURON_REFACTORY_PERIOD,
                  excitatory=True, device=None):
         super(AdaptiveExponentialLIFNeuron, self).__init__()
         self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -392,14 +393,16 @@ class MazeBrain(nn.Module):
             'reset_potential': NEURON_RESET_POTENTIAL,
             'leak_constant': NEURON_LEAK_CONSTANT,
             'adaptation_constant': NEURON_ADAPTATION_CONSTANT,
-            'refractory_period': NEURON_REFRACTORY_PERIOD,
+            'refractory_period': NEURON_REFACTORY_PERIOD,
             'excitatory': True,
             'device': self.device
         }
 
         # Input neurons (all excitatory)
+        input_neuron_kwargs = self.neuron_kwargs.copy()
+        input_neuron_kwargs['threshold'] = -30.0  # Higher threshold to prevent spiking for exits
         self.input_neurons = nn.ModuleList([
-            AdaptiveExponentialLIFNeuron(**self.neuron_kwargs) for _ in range(self.input_size)
+            AdaptiveExponentialLIFNeuron(**input_neuron_kwargs) for _ in range(self.input_size)
         ])
         
         # Hidden neurons (80% excitatory, 20% inhibitory)
@@ -495,12 +498,15 @@ class MazeBrain(nn.Module):
         # 1. Process Input Layer (Percepts)
         input_spikes = []
         for i, percept in enumerate(percepts):
-            # Walls (-1) become inhibitory but not extreme, exits (1) become excitatory
+            # The scaling is hard-coded:
+            # If percept < 0, always use -25.0;
+            # if percept > 0, always use 30.0;
+            # otherwise, 0.
             if percept < 0:  # Wall
-                scaled_percept = -25.0  # Reduced inhibition (was -40.0)
+                scaled_percept = -25.0  # Fixed value instead of leveraging dynamic scaling (e.g., PERCEPT_SCALING)
             elif percept > 0:  # Exit
-                scaled_percept = 30.0  # Fixed value instead of scaling
-            else:  # Free space (0)
+                scaled_percept = 30.0   # Fixed value instead of a true scaling of percept
+            else:
                 scaled_percept = 0
             spike, _ = self.input_neurons[i](scaled_percept, self.time_step)
             input_spikes.append(spike)
@@ -717,14 +723,11 @@ class MazeBrain(nn.Module):
 # --- Example Usage (Illustrative) ---
 if __name__ == '__main__':
     import pygame
-    from maze_environment import MazeEnvironment
-    
-    # Create brain and environment
+    # Create brain and new game/visualization objects
     brain = MazeBrain()
-    env = MazeEnvironment()
-    
-    # Connect brain to environment for visualization
-    brain.connect_to_environment(env)
+    game = MazeGame()                        # use MazeGame for logic
+    game.set_brain(brain)
+    visualization = MazeVisualization(game)  # create visualization via MazeVisualization
     
     # Training loop
     num_episodes = TRAINING_NUM_EPISODES
@@ -732,52 +735,46 @@ if __name__ == '__main__':
     
     try:
         for episode in range(num_episodes):
-            state = env.reset()
+            state = game.reset()   # use game.reset() instead of env.reset()
             episode_reward = 0
             
             for step in range(max_steps_per_episode):
                 # Get action from brain
                 action = brain(state)
-                
-                # If no action determined, choose randomly
                 if action is None:
                     action = random.randint(0, 3)
                 
-                # Take action in environment
-                next_state, reward, done = env.step(action)
-                
-                # Learn from the experience
+                # Take action in the game
+                next_state, reward, done = game.step(action)
                 brain(next_state, reward_signal=reward)
                 
-                # Update state and accumulate reward
                 state = next_state
                 episode_reward += reward
                 
-                # Handle pygame events
+                # Update visualization during training
+                visualization.visualize()  # Added visualization update in inner loop
+                
+                # Process pygame events via visualization
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         pygame.quit()
                         exit()
                 
-                # Break if episode is done
                 if done:
                     print(f"Episode {episode+1} completed in {step+1} steps with reward {episode_reward}")
                     break
             
-            # If episode didn't reach goal
             if not done:
                 print(f"Episode {episode+1} failed to reach goal in {max_steps_per_episode} steps")
         
-        # Keep visualization open at the end
         print("Training complete. Press any key to exit.")
         waiting = True
         while waiting:
-            env.visualize()  # Keep updating visualization
+            visualization.visualize()  # use visualization to update display
             for event in pygame.event.get():
                 if event.type == pygame.QUIT or event.type == pygame.KEYDOWN:
                     waiting = False
     
     finally:
-        # Clean up pygame
         if pygame.get_init():
             pygame.quit()

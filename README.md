@@ -266,6 +266,10 @@ class Visualizer:
 ![BioNet Visualizer Screenshot](assets/screenshot.png)
 *Screenshot of BioNet's visualization interface showing neural activity, network structure, and learning metrics in real-time.*
 
+**Update**  
+![Brain Representation](assets/brain_representation.png)  
+*This updated visualization more accurately reflects the architecture. In the hidden layer, neurons dynamically form and prune connections and neurons as needed, enabling continuous adaptation and optimal performance.*
+
 ## Development Guide
 
 ### Codebase Organization
