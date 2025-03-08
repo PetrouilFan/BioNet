@@ -50,3 +50,6 @@
    • Develop a brain-inspired AI capable of self-organizing, integrating new sensory/cognitive modules, and adapting continuously.
    • Implement spiking neural networks with reinforcement-driven plasticity for real-time, always-on operation.
    • Deploy on neuromorphic hardware for energy efficiency and scalability.
+
+
+TODO: check if is good to pass reward into the network as a dopamine signal

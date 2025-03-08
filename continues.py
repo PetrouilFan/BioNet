@@ -282,8 +282,8 @@ class RewardModulatedSTDPSynapse(nn.Module):
             self.weight_history.append(self.weight.item())
             
             # Debug info if significant change
-            if abs(weight_change) > 0.001:
-                print(f"Weight changed by {weight_change:.4f} to {self.weight.item():.4f} (elig:{eligibility_value:.4f}, reward:{reward_signal:.2f})")
+            # if abs(weight_change) > 0.001:
+            #     print(f"Weight changed by {weight_change:.4f} to {self.weight.item():.4f} (elig:{eligibility_value:.4f}, reward:{reward_signal:.2f})")
     
     def check_structural_plasticity(self, network_activity, time_step, current_density):
         """
@@ -496,7 +496,7 @@ class NeuralModule(nn.Module):
         if self.time_step % 1000 == 0:  # Check every 1000 time steps
             self._structural_plasticity()
             
-        return output_spikes
+        return pre_spike * self.weight
     
     def _update_synapse_traces(self, input_spikes, hidden_spikes, output_spikes):
         """Update all synapse traces based on pre and post activity"""
