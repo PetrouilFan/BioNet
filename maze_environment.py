@@ -129,16 +129,7 @@ class MazeGame:
             return self.generate_maze_with_path()
         
         return maze
-
-    def reset(self):
-        self.maze = self.generate_maze_with_path()
-        self.position = self.start
-        self.exit = (self.maze_width - 2, self.maze_height - 2)
-        # Reset step counter on new episode
-        self.step_counter = 0
-        self.estimated_min_steps = self.calculate_manhattan_distance(self.start, self.exit)
-        return self.get_state()
-
+    
     def calculate_manhattan_distance(self, pos1, pos2):
         """Calculate Manhattan distance between two positions"""
         return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
@@ -163,39 +154,59 @@ class MazeGame:
         
         # Check if new position is a wall
         if self.maze[new_y][new_x] == WALL:
-            reward = -2  # hit a wall: negative reward; position unchanged
+            reward = -5  # Increased wall penalty
         else:
             self.position = (new_x, new_y)
             
             if self.position == self.exit:
-                # Reward for reaching exit inversely proportional to steps taken
+                # Significantly increased exit reward
                 efficiency_factor = self.estimated_min_steps / max(self.step_counter, 1)
-                # Cap efficiency factor between 0.2 and 1.0
-                efficiency_factor = min(1.0, max(0.2, efficiency_factor))
-                reward = 10 + 15 * efficiency_factor  # 12-25 reward based on efficiency
+                # Cap efficiency factor between 0.3 and 1.0
+                efficiency_factor = min(1.0, max(0.3, efficiency_factor))
+                reward = 50 + 50 * efficiency_factor  # 65-100 reward based on efficiency
             else:
-                # Distance-based component: reward for getting closer to exit
+                # Enhanced distance-based rewards
                 if new_distance < old_distance:
-                    reward = 0.5  # Small reward for moving toward exit
+                    reward = 1.0  # Increased reward for moving toward exit
+                    # Add exploration bonus for first visit to a cell
+                    if (new_x, new_y) not in self.visited_cells:
+                        reward += 0.5
                 else:
-                    reward = -1  # Standard penalty for non-productive moves
+                    reward = -1  # Keep standard penalty for non-productive moves
                 
-                # Additional time pressure: increasing penalty for taking too many steps
-                step_penalty = -0.01 * max(0, self.step_counter - self.estimated_min_steps * 2)
-                reward += step_penalty
+                # Softer time pressure: reduced penalty and delayed onset
+                grace_period = self.estimated_min_steps * 3  # Extended grace period
+                if self.step_counter > grace_period:
+                    step_penalty = -0.005 * (self.step_counter - grace_period)  # Reduced penalty coefficient
+                    reward += step_penalty
 
-        # Penalize for multiple output neurons firing if brain is set
+            # Track visited cells for exploration bonus
+            self.visited_cells.add((new_x, new_y))
+
+        # Softer multiple neuron firing penalty with early training grace period
         if self.brain and hasattr(self.brain, 'output_neurons'):
             firing_count = 0
             firing_threshold = -55
             for neuron in self.brain.output_neurons:
                 if len(neuron.potential_history) > 0 and neuron.potential_history[-1] > firing_threshold:
                     firing_count += 1
-            if firing_count > 1:
-                reward -= 2
+            # Only apply multiple firing penalty after some episodes
+            if firing_count > 1 and hasattr(self.brain, 'episode_count') and self.brain.episode_count > 50:
+                reward -= 1  # Reduced penalty
 
         done = self.position == self.exit
         return self.get_state(), reward, done
+
+    def reset(self):
+        self.maze = self.generate_maze_with_path()
+        self.position = self.start
+        self.exit = (self.maze_width - 2, self.maze_height - 2)
+        # Reset step counter on new episode
+        self.step_counter = 0
+        self.estimated_min_steps = self.calculate_manhattan_distance(self.start, self.exit)
+        # Initialize visited cells set for exploration tracking
+        self.visited_cells = set([self.start])
+        return self.get_state()
 
     def set_brain(self, brain):
         self.brain = brain
@@ -260,7 +271,8 @@ class MazeVisualization:
                     pygame.draw.rect(self.screen, WHITE, rect)
                     pygame.draw.rect(self.screen, GRAY, rect, 1)
                 if (x, y) == self.game.exit:
-                    pygame.draw.rect(self.screen, GREEN, rect.inflate(-20, -20))
+                    # Reduced inflate so the exit is visible even in small cells
+                    pygame.draw.rect(self.screen, GREEN, rect.inflate(-4, -4))
         # Draw agent
         x, y = self.game.position
         agent_rect = pygame.Rect(

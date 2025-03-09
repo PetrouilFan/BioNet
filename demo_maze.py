@@ -32,7 +32,7 @@ SYNAPSE_A_PLUS = 0.2               # magnitude of weight potentiation
 SYNAPSE_A_MINUS = 0.21             # magnitude of weight depression
 SYNAPSE_TAU_PLUS = 20.0            # time constant for potentiation
 SYNAPSE_TAU_MINUS = 20.0           # time constant for depression
-SYNAPSE_MIN_WEIGHT = 0.0           # minimum synapse weight
+SYNAPSE_MIN_WEIGHT = -30.0           # minimum synapse weight
 SYNAPSE_ELIGIBILITY_DECAY = 0.95   # decay factor for eligibility trace
 SYNAPSE_CREATION_THRESHOLD = 0.2   # threshold for synaptogenesis
 SYNAPSE_ELIMINATION_THRESHOLD = 0.01 # threshold for synaptic pruning
@@ -42,7 +42,7 @@ SYNAPSE_NOISE_FACTOR = 0.01        # small random noise for eligibility
 # ----------------------------
 SYNAPSE_INIT_MIN_WEIGHT = 6.0      # min weight for new synapses (mV)
 SYNAPSE_INIT_MAX_WEIGHT = 12.0      # max weight for new synapses (mV)
-SYNAPSE_MAX_WEIGHT = 20.0          # max weight allowed during learning
+SYNAPSE_MAX_WEIGHT = 30.0          # max weight allowed during learning
 
 # NETWORK ARCHITECTURE
 # ------------------
